@@ -72,6 +72,7 @@ mongoose.connect(MONGODB_URI).then(() => {
 })
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
+app.get('/', (_req, res) => res.redirect('/api/health'))
 app.use('/static', express.static(publicDir))
 app.use('/static/uploads', express.static(uploadsDir))
 app.use('/static/memories', express.static(memDir))
@@ -174,10 +175,11 @@ app.post('/api/login', (req, res) => {
 app.get('/api/members/:type', async (req, res) => {
   try {
     const { type } = req.params
+    if (mongoose.connection.readyState !== 1) return res.json([])
     const items = await Member.find({ type }).sort({ name: 1 }).lean()
     return res.json(items)
   } catch (e) {
-    res.status(500).json({ error: 'Failed to fetch members' })
+    res.json([])
   }
 })
 
@@ -227,10 +229,11 @@ app.get('/api/news', async (req, res) => {
     const q = {}
     if (active) q.active = true
     if (popup) q.popup = true
+    if (mongoose.connection.readyState !== 1) return res.json([])
     const items = await News.find(q).sort({ createdAt: -1 }).lean()
     return res.json(items)
   } catch {
-    return res.status(500).json({ error: 'Failed to fetch news' })
+    return res.json([])
   }
 })
 app.post('/api/news', requireAdmin, async (req, res) => {
@@ -264,10 +267,11 @@ app.delete('/api/news/:id', requireAdmin, async (req, res) => {
 
 app.get('/api/gallery', async (_req, res) => {
   try {
+    if (mongoose.connection.readyState !== 1) return res.json([])
     const items = await GalleryItem.find().sort({ createdAt: -1 }).lean()
     return res.json(items)
   } catch {
-    return res.status(500).json({ error: 'Failed to fetch gallery' })
+    return res.json([])
   }
 })
 app.post('/api/gallery', requireAdmin, async (req, res) => {
@@ -306,10 +310,11 @@ app.get('/api/notices', async (req, res) => {
     const q = {}
     if (active) q.active = true
     if (popup) q.popup = true
+    if (mongoose.connection.readyState !== 1) return res.json([])
     const items = await Notice.find(q).sort({ createdAt: -1 }).lean()
     return res.json(items)
   } catch {
-    return res.status(500).json({ error: 'Failed to fetch notices' })
+    return res.json([])
   }
 })
 app.post('/api/notices', requireAdmin, async (req, res) => {
