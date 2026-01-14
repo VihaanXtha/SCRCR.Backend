@@ -162,7 +162,7 @@ app.get('/api/memories/:album', async (req, res) => {
   }
 })
 
-app.post('/api/memories/:album/upload', requireAdmin, upload.array('images', 12), async (req, res) => {
+app.post('/api/memories/:album/upload', requireAdmin, upload.array('images', 50), async (req, res) => {
   try {
     const album = (req.params.album || '').toString().replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
     const files = req.files || []
