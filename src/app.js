@@ -31,7 +31,7 @@ const uploadsDir = isVercel ? path.join('/tmp', 'uploads') : path.join(publicDir
 function ensureDir(p) {
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true })
 }
-ensureDir(publicDir)
+if (!isVercel) ensureDir(publicDir)
 ensureDir(memDir)
 ensureDir(uploadsDir)
 
