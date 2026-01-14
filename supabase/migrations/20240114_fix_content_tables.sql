@@ -1,0 +1,16 @@
+-- Add active column to all content tables if it doesn't exist
+
+ALTER TABLE gallery_items ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true;
+ALTER TABLE news ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true;
+ALTER TABLE notices ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true;
+ALTER TABLE members ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true;
+
+-- Ensure rank column exists for reordering
+ALTER TABLE gallery_items ADD COLUMN IF NOT EXISTS rank INTEGER DEFAULT 0;
+ALTER TABLE news ADD COLUMN IF NOT EXISTS rank INTEGER DEFAULT 0;
+ALTER TABLE notices ADD COLUMN IF NOT EXISTS rank INTEGER DEFAULT 0;
+ALTER TABLE members ADD COLUMN IF NOT EXISTS rank INTEGER DEFAULT 0;
+
+-- Ensure popup column exists for news and notices
+ALTER TABLE news ADD COLUMN IF NOT EXISTS popup BOOLEAN DEFAULT false;
+ALTER TABLE notices ADD COLUMN IF NOT EXISTS popup BOOLEAN DEFAULT false;
