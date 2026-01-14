@@ -231,12 +231,46 @@ app.get('/api/members/:type', async (req, res) => {
         .from('members')
         .select('*')
         .eq('type', type)
+        .order('rank', { ascending: true })
         .order('name', { ascending: true })
     
     if (error) throw error
     return res.json(mapList(data))
   } catch (e) {
     res.json([])
+  }
+})
+
+app.put('/api/:resource/reorder', requireAdmin, async (req, res) => {
+  try {
+    const { resource } = req.params
+    const { updates } = req.body
+    
+    const validResources = {
+        'members': 'members',
+        'news': 'news',
+        'gallery': 'gallery_items',
+        'notices': 'notices'
+    }
+    
+    const tableName = validResources[resource]
+    if (!tableName) return res.status(400).json({ error: 'Invalid resource' })
+    
+    if (!updates || !Array.isArray(updates)) return res.status(400).json({ error: 'Invalid updates payload' })
+    
+    // Validate IDs
+    const validUpdates = updates.filter(u => u.id && typeof u.rank === 'number')
+    if (validUpdates.length === 0) return res.json({ ok: true })
+
+    const promises = validUpdates.map(u => 
+      supabase.from(tableName).update({ rank: u.rank }).eq('id', u.id)
+    )
+    
+    await Promise.all(promises)
+    return res.json({ ok: true })
+  } catch (e) {
+    console.error('Reorder error:', e)
+    res.status(500).json({ error: e.message || 'Failed to reorder' })
   }
 })
 
@@ -288,7 +322,7 @@ app.get('/api/news', async (req, res) => {
     const active = req.query.active === 'true'
     const popup = req.query.popup === 'true'
     
-    let query = supabase.from('news').select('*').order('created_at', { ascending: false })
+    let query = supabase.from('news').select('*').order('rank', { ascending: true }).order('created_at', { ascending: false })
     
     if (active) query = query.eq('active', true)
     if (popup) query = query.eq('popup', true)
@@ -346,7 +380,7 @@ app.delete('/api/news/:id', requireAdmin, async (req, res) => {
 
 app.get('/api/gallery', async (_req, res) => {
   try {
-    const { data, error } = await supabase.from('gallery_items').select('*').order('created_at', { ascending: false })
+    const { data, error } = await supabase.from('gallery_items').select('*').order('rank', { ascending: true }).order('created_at', { ascending: false })
     if (error) throw error
     return res.json(mapList(data))
   } catch {
@@ -396,7 +430,7 @@ app.get('/api/notices', async (req, res) => {
     const active = req.query.active === 'true'
     const popup = req.query.popup === 'true'
     
-    let query = supabase.from('notices').select('*').order('created_at', { ascending: false })
+    let query = supabase.from('notices').select('*').order('rank', { ascending: true }).order('created_at', { ascending: false })
     if (active) query = query.eq('active', true)
     if (popup) query = query.eq('popup', true)
     
