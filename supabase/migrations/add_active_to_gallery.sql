@@ -1,0 +1,2 @@
+
+ALTER TABLE gallery_items ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true;
