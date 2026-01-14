@@ -415,10 +415,29 @@ app.get('/api/gallery', async (_req, res) => {
 
 app.post('/api/gallery', requireAdmin, async (req, res) => {
   try {
-    const { data, error } = await supabase.from('gallery_items').insert(toSnake(req.body)).select().single()
-    if (error) throw error
+    const payload = {
+        ...toSnake(req.body),
+        type: req.body?.type || 'image', // Default to image if not specified
+        img: req.body?.url || req.body?.img, // Handle both 'url' and 'img'
+        title: req.body?.title,
+        video_url: req.body?.videoUrl
+    }
+    // Clean up undefined/null values so they don't break insert if not nullable
+    if (payload.img === undefined) delete payload.img
+    if (payload.video_url === undefined) delete payload.video_url
+    if (payload.title === undefined) delete payload.title
+    
+    // Explicitly remove fields that don't exist in DB
+    delete payload.url
+    delete payload.videoUrl
+    const { data, error } = await supabase.from('gallery_items').insert(payload).select().single()
+    if (error) {
+        console.error('Supabase Gallery Insert Error:', error)
+        throw error
+    }
     return res.status(201).json(mapId(data))
-  } catch {
+  } catch (e) {
+    console.error('Gallery create error:', e)
     return res.status(400).json({ error: 'Failed to create gallery item' })
   }
 })
