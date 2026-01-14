@@ -1,168 +1,210 @@
+
 import express from 'express'
 import cors from 'cors'
-import mongoose from 'mongoose'
+import { createClient } from '@supabase/supabase-js'
 import dotenv from 'dotenv'
-import fs from 'fs'
-import path from 'path'
-import { fileURLToPath } from 'url'
 import multer from 'multer'
-import Member from './models/Member.js'
-import News from './models/News.js'
-import GalleryItem from './models/GalleryItem.js'
-import Notice from './models/Notice.js'
+import path from 'path'
 
 dotenv.config()
 const app = express()
 app.use(cors())
 app.use(express.json())
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/scrc'
+const SUPABASE_URL = process.env.SUPABASE_URL
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'changeme'
 const ADMIN_USER = process.env.ADMIN_USER || 'vihaan'
 const ADMIN_PASS = process.env.ADMIN_PASS || 'doramon12'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const publicDir = path.join(__dirname, '../public')
-
-const isVercel = !!process.env.VERCEL
-const memDir = isVercel ? path.join('/tmp', 'memories') : path.join(publicDir, 'memories')
-const uploadsDir = isVercel ? path.join('/tmp', 'uploads') : path.join(publicDir, 'uploads')
-
-function ensureDir(p) {
-  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true })
+if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+  console.error('Missing Supabase credentials')
 }
-if (!isVercel) ensureDir(publicDir)
-ensureDir(memDir)
-ensureDir(uploadsDir)
 
-const storage = multer.diskStorage({
-  destination: (req, _file, cb) => {
-    const album = (req.params.album || '').toString()
-    const safe = album.replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
-    const target = path.join(memDir, safe)
-    ensureDir(target)
-    cb(null, target)
-  },
-  filename: (_req, file, cb) => {
-    const ts = Date.now()
-    const ext = path.extname(file.originalname)
-    cb(null, `${ts}${ext}`)
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+// Memory storage for uploads
+const upload = multer({ storage: multer.memoryStorage() })
+
+// Helper to map id to _id and snake_case to camelCase for frontend compatibility
+const mapId = (item) => {
+  if (!item) return null
+  const { id, published_at, video_url, media_url, ...rest } = item
+  return { 
+      _id: id, 
+      ...(published_at && { publishedAt: published_at }),
+      ...(video_url && { videoUrl: video_url }),
+      ...(media_url && { mediaUrl: media_url }),
+      ...rest 
   }
-})
-const upload = multer({ storage })
+}
 
-const generalStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    ensureDir(uploadsDir)
-    cb(null, uploadsDir)
-  },
-  filename: (_req, file, cb) => {
-    const ts = Date.now()
-    const ext = path.extname(file.originalname)
-    cb(null, `${ts}${ext}`)
-  }
-})
-const generalUpload = multer({ storage: generalStorage })
+const mapList = (items) => (items || []).map(mapId)
 
-mongoose.connect(MONGODB_URI).then(() => {
-  console.log('MongoDB connected')
-}).catch(err => {
-  console.error('MongoDB connection error', err)
-  // In serverless, avoid exiting; just return health errors if needed
-})
+// Helper to map camelCase to snake_case for Supabase
+const toSnake = (o) => {
+    const newO = {}
+    for (const k in o) {
+        if (k === 'videoUrl') newO.video_url = o[k]
+        else if (k === 'mediaUrl') newO.media_url = o[k]
+        else if (k === 'publishedAt') newO.published_at = o[k]
+        else newO[k] = o[k]
+    }
+    return newO
+}
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 app.get('/', (_req, res) => res.redirect('/api/health'))
-app.use('/static', express.static(publicDir))
-app.use('/static/uploads', express.static(uploadsDir))
-app.use('/static/memories', express.static(memDir))
 
-app.get('/api/memories', (_req, res) => {
+// Static files are no longer served from local FS in production/Supabase mode
+// But we keep the route for backward compatibility if any static assets remain? 
+// No, we should rely on public URLs.
+
+// --- Memories (Storage) ---
+
+app.get('/api/memories', async (_req, res) => {
   try {
-    if (!fs.existsSync(memDir)) return res.json([])
-    const files = fs.readdirSync(memDir)
-      .filter(f => /\.(jpg|jpeg|png|gif|webp)$/i.test(f))
-      .map(f => `/static/memories/${f}`)
+    const { data, error } = await supabase.storage.from('scrc-uploads').list('memories')
+    if (error) throw error
+    
+    // Filter for files (files have metadata)
+    const files = data
+      .filter(item => item.metadata)
+      .map(item => supabase.storage.from('scrc-uploads').getPublicUrl(`memories/${item.name}`).data.publicUrl)
+      
     return res.json(files)
-  } catch {
+  } catch (e) {
+    console.error(e)
     return res.status(500).json({ error: 'Failed to list memories' })
   }
 })
-app.get('/api/memories/albums', (_req, res) => {
+
+app.get('/api/memories/albums', async (_req, res) => {
   try {
-    ensureDir(memDir)
-    const albums = fs.readdirSync(memDir, { withFileTypes: true })
-      .filter(d => d.isDirectory())
-      .map(d => {
-        const dir = path.join(memDir, d.name)
-        const imgs = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => /\.(jpg|jpeg|png|gif|webp)$/i.test(f)) : []
-        const cover = imgs[0] ? `/static/memories/${d.name}/${imgs[0]}` : undefined
-        return { name: d.name, count: imgs.length, cover }
-      })
+    const { data, error } = await supabase.storage.from('scrc-uploads').list('memories')
+    if (error) throw error
+
+    // Folders usually don't have metadata (or specific mimetype logic)
+    // In Supabase Storage, folders are just prefixes. But list() returns them as items.
+    const folders = data.filter(item => !item.metadata)
+
+    const albums = await Promise.all(folders.map(async (folder) => {
+      const { data: files } = await supabase.storage.from('scrc-uploads').list(`memories/${folder.name}`, { limit: 1 })
+      const images = files ? files.filter(f => f.metadata) : []
+      // We need count. list() has limit.
+      // To get full count we might need a larger limit or another approach. 
+      // For now, let's just list with a higher limit or accept partial count if many files.
+      // Actually, let's list up to 1000.
+      const { data: allFiles } = await supabase.storage.from('scrc-uploads').list(`memories/${folder.name}`, { limit: 1000 })
+      const count = allFiles ? allFiles.filter(f => f.metadata).length : 0
+      
+      const cover = images.length > 0 
+        ? supabase.storage.from('scrc-uploads').getPublicUrl(`memories/${folder.name}/${images[0].name}`).data.publicUrl
+        : undefined
+        
+      return { name: folder.name, count, cover }
+    }))
+    
     return res.json(albums)
-  } catch {
+  } catch (e) {
+    console.error(e)
     return res.status(500).json({ error: 'Failed to list albums' })
   }
 })
-app.post('/api/memories/albums', requireAdmin, (req, res) => {
+
+app.post('/api/memories/albums', requireAdmin, async (req, res) => {
   try {
     const { name } = req.body || {}
     const safe = (name || '').toString().replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
     if (!safe) return res.status(400).json({ error: 'Invalid name' })
-    const dir = path.join(memDir, safe)
-    ensureDir(dir)
+    
+    // Create a placeholder file to establish the folder
+    const { error } = await supabase.storage.from('scrc-uploads').upload(`memories/${safe}/.keep`, '')
+    if (error) throw error
+    
     return res.status(201).json({ name: safe })
-  } catch {
+  } catch (e) {
     return res.status(500).json({ error: 'Failed to create album' })
   }
 })
-app.delete('/api/memories/albums/:album', requireAdmin, (req, res) => {
+
+app.delete('/api/memories/albums/:album', requireAdmin, async (req, res) => {
   try {
-    const album = (req.params.album || '').toString()
-    const safe = album.replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
-    const dir = path.join(memDir, safe)
-    if (!fs.existsSync(dir)) return res.status(404).json({ error: 'Not found' })
-    fs.rmSync(dir, { recursive: true, force: true })
+    const album = (req.params.album || '').toString().replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
+    
+    // List all files in album
+    const { data: files } = await supabase.storage.from('scrc-uploads').list(`memories/${album}`, { limit: 1000 })
+    if (files && files.length > 0) {
+        const paths = files.map(f => `memories/${album}/${f.name}`)
+        await supabase.storage.from('scrc-uploads').remove(paths)
+    }
+    // Remove the folder itself? Supabase removes folder if empty.
     return res.json({ ok: true })
-  } catch {
+  } catch (e) {
     return res.status(500).json({ error: 'Failed to delete album' })
   }
 })
-app.get('/api/memories/:album', (req, res) => {
+
+app.get('/api/memories/:album', async (req, res) => {
   try {
-    const album = (req.params.album || '').toString()
-    const safe = album.replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
-    const dir = path.join(memDir, safe)
-    if (!fs.existsSync(dir)) return res.json([])
-    const files = fs.readdirSync(dir)
-      .filter(f => /\.(jpg|jpeg|png|gif|webp)$/i.test(f))
-      .map(f => `/static/memories/${safe}/${f}`)
+    const album = (req.params.album || '').toString().replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
+    const { data, error } = await supabase.storage.from('scrc-uploads').list(`memories/${album}`, { limit: 1000 })
+    if (error) throw error
+    
+    const files = data
+      .filter(f => f.metadata) // Only files
+      .filter(f => f.name !== '.keep') // Ignore keep file
+      .map(f => supabase.storage.from('scrc-uploads').getPublicUrl(`memories/${album}/${f.name}`).data.publicUrl)
+      
     return res.json(files)
-  } catch {
+  } catch (e) {
     return res.status(500).json({ error: 'Failed to list album images' })
   }
 })
-app.post('/api/memories/:album/upload', requireAdmin, upload.array('images', 12), (req, res) => {
+
+app.post('/api/memories/:album/upload', requireAdmin, upload.array('images', 12), async (req, res) => {
   try {
     const album = (req.params.album || '').toString().replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
-    const files = (req.files || []).map(f => `/static/memories/${album}/${path.basename(f.path)}`)
-    return res.status(201).json({ uploaded: files })
-  } catch {
+    const files = req.files || []
+    const uploadedUrls = []
+
+    for (const file of files) {
+        const ext = path.extname(file.originalname)
+        const name = `${Date.now()}_${Math.random().toString(36).substring(7)}${ext}`
+        const { error } = await supabase.storage.from('scrc-uploads').upload(`memories/${album}/${name}`, file.buffer, {
+            contentType: file.mimetype
+        })
+        if (!error) {
+            uploadedUrls.push(supabase.storage.from('scrc-uploads').getPublicUrl(`memories/${album}/${name}`).data.publicUrl)
+        }
+    }
+    return res.status(201).json({ uploaded: uploadedUrls })
+  } catch (e) {
     return res.status(500).json({ error: 'Upload failed' })
   }
 })
-app.delete('/api/memories/:album/:filename', requireAdmin, (req, res) => {
-  try {
-    const album = (req.params.album || '').toString().replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
-    const filename = (req.params.filename || '').toString()
-    const filePath = path.join(memDir, album, filename)
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' })
-    fs.rmSync(filePath, { force: true })
-    return res.json({ ok: true })
-  } catch {
-    return res.status(500).json({ error: 'Failed to delete image' })
-  }
+
+app.delete('/api/memories/:album/:filename', requireAdmin, async (req, res) => {
+    // This might be tricky because filename in URL is the full filename, but we need to match it.
+    // The frontend sends the filename.
+    // Note: Frontend likely sends just the filename, not the full URL.
+    // Let's check original code: 
+    // const filename = (req.params.filename || '').toString()
+    // const filePath = path.join(memDir, album, filename)
+    // So yes, it's just the filename.
+    try {
+        const album = (req.params.album || '').toString().replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
+        const filename = (req.params.filename || '').toString()
+        const { error } = await supabase.storage.from('scrc-uploads').remove([`memories/${album}/${filename}`])
+        if (error) throw error
+        return res.json({ ok: true })
+    } catch {
+        return res.status(500).json({ error: 'Failed to delete image' })
+    }
 })
+
+
+// --- Auth ---
 
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body || {}
@@ -170,17 +212,6 @@ app.post('/api/login', (req, res) => {
     return res.json({ token: ADMIN_TOKEN })
   }
   return res.status(401).json({ error: 'Invalid credentials' })
-})
-
-app.get('/api/members/:type', async (req, res) => {
-  try {
-    const { type } = req.params
-    if (mongoose.connection.readyState !== 1) return res.json([])
-    const items = await Member.find({ type }).sort({ name: 1 }).lean()
-    return res.json(items)
-  } catch (e) {
-    res.json([])
-  }
 })
 
 function requireAdmin(req, res, next) {
@@ -191,10 +222,29 @@ function requireAdmin(req, res, next) {
   next()
 }
 
+// --- Members ---
+
+app.get('/api/members/:type', async (req, res) => {
+  try {
+    const { type } = req.params
+    const { data, error } = await supabase
+        .from('members')
+        .select('*')
+        .eq('type', type)
+        .order('name', { ascending: true })
+    
+    if (error) throw error
+    return res.json(mapList(data))
+  } catch (e) {
+    res.json([])
+  }
+})
+
 app.post('/api/members', requireAdmin, async (req, res) => {
   try {
-    const created = await Member.create(req.body)
-    return res.status(201).json(created)
+    const { data, error } = await supabase.from('members').insert(req.body).select().single()
+    if (error) throw error
+    return res.status(201).json(mapId(data))
   } catch (e) {
     res.status(400).json({ error: 'Failed to create member' })
   }
@@ -203,9 +253,17 @@ app.post('/api/members', requireAdmin, async (req, res) => {
 app.put('/api/members/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params
-    const updated = await Member.findByIdAndUpdate(id, req.body, { new: true }).lean()
-    if (!updated) return res.status(404).json({ error: 'Not found' })
-    return res.json(updated)
+    const { _id, ...updateData } = req.body // Remove _id if present in body
+    const { data, error } = await supabase
+        .from('members')
+        .update(updateData)
+        .eq('id', id)
+        .select()
+        .single()
+        
+    if (error) throw error
+    if (!data) return res.status(404).json({ error: 'Not found' })
+    return res.json(mapId(data))
   } catch (e) {
     res.status(400).json({ error: 'Failed to update member' })
   }
@@ -214,143 +272,196 @@ app.put('/api/members/:id', requireAdmin, async (req, res) => {
 app.delete('/api/members/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params
-    const removed = await Member.findByIdAndDelete(id).lean()
-    if (!removed) return res.status(404).json({ error: 'Not found' })
-    return res.json(removed)
+    const { data, error } = await supabase.from('members').delete().eq('id', id).select().single()
+    if (error) throw error
+    if (!data) return res.status(404).json({ error: 'Not found' })
+    return res.json(mapId(data))
   } catch (e) {
     res.status(400).json({ error: 'Failed to delete member' })
   }
 })
 
+// --- News ---
+
 app.get('/api/news', async (req, res) => {
   try {
     const active = req.query.active === 'true'
     const popup = req.query.popup === 'true'
-    const q = {}
-    if (active) q.active = true
-    if (popup) q.popup = true
-    if (mongoose.connection.readyState !== 1) return res.json([])
-    const items = await News.find(q).sort({ createdAt: -1 }).lean()
-    return res.json(items)
+    
+    let query = supabase.from('news').select('*').order('created_at', { ascending: false })
+    
+    if (active) query = query.eq('active', true)
+    if (popup) query = query.eq('popup', true)
+    
+    const { data, error } = await query
+    if (error) throw error
+    return res.json(mapList(data))
   } catch {
     return res.json([])
   }
 })
+
 app.post('/api/news', requireAdmin, async (req, res) => {
   try {
-    const created = await News.create({ ...req.body, publishedAt: new Date(), active: req.body?.active ?? true, popup: req.body?.popup ?? false })
-    return res.status(201).json(created)
+    const payload = {
+        ...toSnake(req.body),
+        published_at: new Date(),
+        active: req.body?.active ?? true,
+        popup: req.body?.popup ?? false
+    }
+    const { data, error } = await supabase.from('news').insert(payload).select().single()
+    if (error) throw error
+    return res.status(201).json(mapId(data))
   } catch {
     return res.status(400).json({ error: 'Failed to create news' })
   }
 })
+
 app.put('/api/news/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params
-    const updated = await News.findByIdAndUpdate(id, req.body, { new: true }).lean()
-    if (!updated) return res.status(404).json({ error: 'Not found' })
-    return res.json(updated)
+    const { _id, ...updateData } = req.body
+    const { data, error } = await supabase.from('news').update(toSnake(updateData)).eq('id', id).select().single()
+    if (error) throw error
+    if (!data) return res.status(404).json({ error: 'Not found' })
+    return res.json(mapId(data))
   } catch {
     return res.status(400).json({ error: 'Failed to update news' })
   }
 })
+
 app.delete('/api/news/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params
-    const removed = await News.findByIdAndDelete(id).lean()
-    if (!removed) return res.status(404).json({ error: 'Not found' })
-    return res.json(removed)
+    const { data, error } = await supabase.from('news').delete().eq('id', id).select().single()
+    if (error) throw error
+    if (!data) return res.status(404).json({ error: 'Not found' })
+    return res.json(mapId(data))
   } catch {
     return res.status(400).json({ error: 'Failed to delete news' })
   }
 })
 
+// --- Gallery ---
+
 app.get('/api/gallery', async (_req, res) => {
   try {
-    if (mongoose.connection.readyState !== 1) return res.json([])
-    const items = await GalleryItem.find().sort({ createdAt: -1 }).lean()
-    return res.json(items)
+    const { data, error } = await supabase.from('gallery_items').select('*').order('created_at', { ascending: false })
+    if (error) throw error
+    return res.json(mapList(data))
   } catch {
     return res.json([])
   }
 })
+
 app.post('/api/gallery', requireAdmin, async (req, res) => {
   try {
-    const created = await GalleryItem.create(req.body)
-    return res.status(201).json(created)
+    const { data, error } = await supabase.from('gallery_items').insert(toSnake(req.body)).select().single()
+    if (error) throw error
+    return res.status(201).json(mapId(data))
   } catch {
     return res.status(400).json({ error: 'Failed to create gallery item' })
   }
 })
+
 app.put('/api/gallery/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params
-    const updated = await GalleryItem.findByIdAndUpdate(id, req.body, { new: true }).lean()
-    if (!updated) return res.status(404).json({ error: 'Not found' })
-    return res.json(updated)
+    const { _id, ...updateData } = req.body
+    const { data, error } = await supabase.from('gallery_items').update(toSnake(updateData)).eq('id', id).select().single()
+    if (error) throw error
+    if (!data) return res.status(404).json({ error: 'Not found' })
+    return res.json(mapId(data))
   } catch {
     return res.status(400).json({ error: 'Failed to update gallery item' })
   }
 })
+
 app.delete('/api/gallery/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params
-    const removed = await GalleryItem.findByIdAndDelete(id).lean()
-    if (!removed) return res.status(404).json({ error: 'Not found' })
-    return res.json(removed)
+    const { data, error } = await supabase.from('gallery_items').delete().eq('id', id).select().single()
+    if (error) throw error
+    if (!data) return res.status(404).json({ error: 'Not found' })
+    return res.json(mapId(data))
   } catch {
     return res.status(400).json({ error: 'Failed to delete gallery item' })
   }
 })
 
+// --- Notices ---
+
 app.get('/api/notices', async (req, res) => {
   try {
     const active = req.query.active === 'true'
     const popup = req.query.popup === 'true'
-    const q = {}
-    if (active) q.active = true
-    if (popup) q.popup = true
-    if (mongoose.connection.readyState !== 1) return res.json([])
-    const items = await Notice.find(q).sort({ createdAt: -1 }).lean()
-    return res.json(items)
+    
+    let query = supabase.from('notices').select('*').order('created_at', { ascending: false })
+    if (active) query = query.eq('active', true)
+    if (popup) query = query.eq('popup', true)
+    
+    const { data, error } = await query
+    if (error) throw error
+    return res.json(mapList(data))
   } catch {
     return res.json([])
   }
 })
+
 app.post('/api/notices', requireAdmin, async (req, res) => {
   try {
-    const created = await Notice.create(req.body)
-    return res.status(201).json(created)
+    const { data, error } = await supabase.from('notices').insert(toSnake(req.body)).select().single()
+    if (error) throw error
+    return res.status(201).json(mapId(data))
   } catch {
     return res.status(400).json({ error: 'Failed to create notice' })
   }
 })
+
 app.put('/api/notices/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params
-    const updated = await Notice.findByIdAndUpdate(id, req.body, { new: true }).lean()
-    if (!updated) return res.status(404).json({ error: 'Not found' })
-    return res.json(updated)
+    const { _id, ...updateData } = req.body
+    
+    const { data, error } = await supabase.from('notices').update(toSnake(updateData)).eq('id', id).select().single()
+    if (error) throw error
+    if (!data) return res.status(404).json({ error: 'Not found' })
+    return res.json(mapId(data))
   } catch {
     return res.status(400).json({ error: 'Failed to update notice' })
   }
 })
+
 app.delete('/api/notices/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params
-    const removed = await Notice.findByIdAndDelete(id).lean()
-    if (!removed) return res.status(404).json({ error: 'Not found' })
-    return res.json(removed)
+    const { data, error } = await supabase.from('notices').delete().eq('id', id).select().single()
+    if (error) throw error
+    if (!data) return res.status(404).json({ error: 'Not found' })
+    return res.json(mapId(data))
   } catch {
     return res.status(400).json({ error: 'Failed to delete notice' })
   }
 })
-app.post('/api/upload', requireAdmin, generalUpload.single('image'), (req, res) => {
+
+// --- General Upload ---
+
+app.post('/api/upload', requireAdmin, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' })
-    const fileUrl = `/static/uploads/${path.basename(req.file.path)}`
-    return res.status(201).json({ url: fileUrl })
-  } catch {
+    
+    const ext = path.extname(req.file.originalname)
+    const name = `uploads/${Date.now()}_${Math.random().toString(36).substring(7)}${ext}`
+    
+    const { error } = await supabase.storage.from('scrc-uploads').upload(name, req.file.buffer, {
+        contentType: req.file.mimetype
+    })
+    
+    if (error) throw error
+    
+    const url = supabase.storage.from('scrc-uploads').getPublicUrl(name).data.publicUrl
+    return res.status(201).json({ url })
+  } catch (e) {
     return res.status(500).json({ error: 'Upload failed' })
   }
 })

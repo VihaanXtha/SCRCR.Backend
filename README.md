@@ -1,6 +1,6 @@
 # SCRCR Backend
 
-This is the backend for the Senior Citizen Recreation Centre website, built with Express and MongoDB.
+This is the backend for the Senior Citizen Recreation Centre website, built with Express and Supabase.
 
 ## Production URL
 
@@ -8,11 +8,11 @@ This is the backend for the Senior Citizen Recreation Centre website, built with
 
 ## Environment Variables
 
-For the backend to function correctly on Vercel or locally, set the following environment variables:
+For the backend to function correctly on Vercel, set the following environment variables in your Vercel Project Settings:
 
-- `MONGODB_URI`: Connection string for MongoDB Atlas.
-  - Format: `mongodb+srv://<user>:<password>@cluster0.yyyqan4.mongodb.net/scrc?retryWrites=true&w=majority`
-- `ADMIN_TOKEN`: A secure token for admin authentication.
+- `SUPABASE_URL`: Your Supabase Project URL.
+- `SUPABASE_SERVICE_KEY`: Your Supabase Service Role Key (Keep this secret!).
+- `ADMIN_TOKEN`: A secure token for admin authentication (shared with frontend).
 - `ADMIN_USER`: Admin username.
 - `ADMIN_PASS`: Admin password.
 
@@ -23,11 +23,12 @@ For the backend to function correctly on Vercel or locally, set the following en
 - **News**: `GET /api/news`
 - **Notices**: `GET /api/notices`
 - **Gallery**: `GET /api/gallery`
-- **Uploads**: `POST /api/upload` (Ephemeral on Vercel)
+- **Uploads**: `POST /api/upload` (Stored in Supabase Storage `scrc-uploads` bucket)
 
 ## Deployment
 
 This project is deployed on Vercel as a Serverless Function.
 
 - The entry point for Vercel is `api/index.js`.
-- Static files (uploads) are stored in `/tmp` on Vercel and are not persistent. For production storage, consider integrating an external service like Cloudinary or AWS S3.
+- Database: Supabase (PostgreSQL).
+- File Storage: Supabase Storage.
