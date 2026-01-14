@@ -60,52 +60,30 @@ app.get('/', (_req, res) => res.redirect('/api/health'))
 // But we keep the route for backward compatibility if any static assets remain? 
 // No, we should rely on public URLs.
 
-// --- Memories (Storage) ---
-
-app.get('/api/memories', async (_req, res) => {
-  try {
-    const { data, error } = await supabase.storage.from('scrc-uploads').list('memories')
-    if (error) throw error
-    
-    // Filter for files (files have metadata)
-    const files = data
-      .filter(item => item.metadata)
-      .map(item => supabase.storage.from('scrc-uploads').getPublicUrl(`memories/${item.name}`).data.publicUrl)
-      
-    return res.json(files)
-  } catch (e) {
-    console.error(e)
-    return res.status(500).json({ error: 'Failed to list memories' })
-  }
-})
+// --- Memories (Database + Storage) ---
 
 app.get('/api/memories/albums', async (_req, res) => {
   try {
-    const { data, error } = await supabase.storage.from('scrc-uploads').list('memories')
+    const { data: albums, error } = await supabase
+      .from('memory_albums')
+      .select(`
+        id,
+        name,
+        memory_images (
+          url
+        )
+      `)
+      .order('name', { ascending: true })
+
     if (error) throw error
 
-    // Folders usually don't have metadata (or specific mimetype logic)
-    // In Supabase Storage, folders are just prefixes. But list() returns them as items.
-    const folders = data.filter(item => !item.metadata)
-
-    const albums = await Promise.all(folders.map(async (folder) => {
-      const { data: files } = await supabase.storage.from('scrc-uploads').list(`memories/${folder.name}`, { limit: 1 })
-      const images = files ? files.filter(f => f.metadata) : []
-      // We need count. list() has limit.
-      // To get full count we might need a larger limit or another approach. 
-      // For now, let's just list with a higher limit or accept partial count if many files.
-      // Actually, let's list up to 1000.
-      const { data: allFiles } = await supabase.storage.from('scrc-uploads').list(`memories/${folder.name}`, { limit: 1000 })
-      const count = allFiles ? allFiles.filter(f => f.metadata).length : 0
-      
-      const cover = images.length > 0 
-        ? supabase.storage.from('scrc-uploads').getPublicUrl(`memories/${folder.name}/${images[0].name}`).data.publicUrl
-        : undefined
-        
-      return { name: folder.name, count, cover }
+    const result = albums.map(album => ({
+      name: album.name,
+      count: album.memory_images.length,
+      cover: album.memory_images.length > 0 ? album.memory_images[0].url : undefined
     }))
     
-    return res.json(albums)
+    return res.json(result)
   } catch (e) {
     console.error(e)
     return res.status(500).json({ error: 'Failed to list albums' })
@@ -118,87 +96,130 @@ app.post('/api/memories/albums', requireAdmin, async (req, res) => {
     const safe = (name || '').toString().replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
     if (!safe) return res.status(400).json({ error: 'Invalid name' })
     
-    // Create a placeholder file to establish the folder
-    const { error } = await supabase.storage.from('scrc-uploads').upload(`memories/${safe}/.keep`, '')
+    const { data, error } = await supabase
+      .from('memory_albums')
+      .insert({ name: safe })
+      .select()
+      .single()
+
     if (error) throw error
     
-    return res.status(201).json({ name: safe })
+    return res.status(201).json({ name: data.name })
   } catch (e) {
+    console.error(e)
     return res.status(500).json({ error: 'Failed to create album' })
   }
 })
 
 app.delete('/api/memories/albums/:album', requireAdmin, async (req, res) => {
   try {
-    const album = (req.params.album || '').toString().replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
+    const albumName = (req.params.album || '').toString().trim()
     
-    // List all files in album
-    const { data: files } = await supabase.storage.from('scrc-uploads').list(`memories/${album}`, { limit: 1000 })
+    // Get album ID
+    const { data: album, error: albumErr } = await supabase
+      .from('memory_albums')
+      .select('id')
+      .eq('name', albumName)
+      .single()
+
+    if (albumErr || !album) throw new Error('Album not found')
+
+    // Delete from storage
+    const { data: files } = await supabase.storage.from('scrc-uploads').list(`memories/${albumName}`, { limit: 1000 })
     if (files && files.length > 0) {
-        const paths = files.map(f => `memories/${album}/${f.name}`)
+        const paths = files.map(f => `memories/${albumName}/${f.name}`)
         await supabase.storage.from('scrc-uploads').remove(paths)
     }
-    // Remove the folder itself? Supabase removes folder if empty.
+
+    // Delete from DB (cascade will handle images)
+    const { error } = await supabase.from('memory_albums').delete().eq('id', album.id)
+    if (error) throw error
+
     return res.json({ ok: true })
   } catch (e) {
+    console.error(e)
     return res.status(500).json({ error: 'Failed to delete album' })
   }
 })
 
 app.get('/api/memories/:album', async (req, res) => {
   try {
-    const album = (req.params.album || '').toString().replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
-    const { data, error } = await supabase.storage.from('scrc-uploads').list(`memories/${album}`, { limit: 1000 })
-    if (error) throw error
+    const albumName = (req.params.album || '').toString().trim()
     
-    const files = data
-      .filter(f => f.metadata) // Only files
-      .filter(f => f.name !== '.keep') // Ignore keep file
-      .map(f => supabase.storage.from('scrc-uploads').getPublicUrl(`memories/${album}/${f.name}`).data.publicUrl)
+    const { data: album } = await supabase.from('memory_albums').select('id').eq('name', albumName).single()
+    if (!album) return res.json([])
+
+    const { data: images, error } = await supabase
+        .from('memory_images')
+        .select('id, url, rank')
+        .eq('album_id', album.id)
+        .order('rank', { ascending: true })
+        .order('created_at', { ascending: false })
+
+    if (error) throw error
       
-    return res.json(files)
+    return res.json(mapList(images))
   } catch (e) {
+    console.error(e)
     return res.status(500).json({ error: 'Failed to list album images' })
   }
 })
 
 app.post('/api/memories/:album/upload', requireAdmin, upload.array('images', 50), async (req, res) => {
   try {
-    const album = (req.params.album || '').toString().replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
+    const albumName = (req.params.album || '').toString().trim()
     const files = req.files || []
     const uploadedUrls = []
+
+    const { data: album } = await supabase.from('memory_albums').select('id').eq('name', albumName).single()
+    if (!album) return res.status(404).json({ error: 'Album not found' })
 
     for (const file of files) {
         const ext = path.extname(file.originalname)
         const name = `${Date.now()}_${Math.random().toString(36).substring(7)}${ext}`
-        const { error } = await supabase.storage.from('scrc-uploads').upload(`memories/${album}/${name}`, file.buffer, {
+        const { error: storageErr } = await supabase.storage.from('scrc-uploads').upload(`memories/${albumName}/${name}`, file.buffer, {
             contentType: file.mimetype
         })
-        if (!error) {
-            uploadedUrls.push(supabase.storage.from('scrc-uploads').getPublicUrl(`memories/${album}/${name}`).data.publicUrl)
+        
+        if (!storageErr) {
+            const url = supabase.storage.from('scrc-uploads').getPublicUrl(`memories/${albumName}/${name}`).data.publicUrl
+            uploadedUrls.push(url)
+            
+            // Insert into DB
+            await supabase.from('memory_images').insert({
+                album_id: album.id,
+                url: url
+            })
         }
     }
     return res.status(201).json({ uploaded: uploadedUrls })
   } catch (e) {
+    console.error(e)
     return res.status(500).json({ error: 'Upload failed' })
   }
 })
 
 app.delete('/api/memories/:album/:filename', requireAdmin, async (req, res) => {
-    // This might be tricky because filename in URL is the full filename, but we need to match it.
-    // The frontend sends the filename.
-    // Note: Frontend likely sends just the filename, not the full URL.
-    // Let's check original code: 
-    // const filename = (req.params.filename || '').toString()
-    // const filePath = path.join(memDir, album, filename)
-    // So yes, it's just the filename.
     try {
-        const album = (req.params.album || '').toString().replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
+        const albumName = (req.params.album || '').toString().trim()
         const filename = (req.params.filename || '').toString()
-        const { error } = await supabase.storage.from('scrc-uploads').remove([`memories/${album}/${filename}`])
-        if (error) throw error
+        
+        // Remove from storage
+        const { error: storageErr } = await supabase.storage.from('scrc-uploads').remove([`memories/${albumName}/${filename}`])
+        if (storageErr) throw storageErr
+        
+        // Remove from DB
+        const urlPart = `memories/${albumName}/${filename}`
+        const { data: images } = await supabase.from('memory_images').select('id, url')
+        const toDelete = images.find(img => img.url.includes(urlPart))
+        
+        if (toDelete) {
+            await supabase.from('memory_images').delete().eq('id', toDelete.id)
+        }
+
         return res.json({ ok: true })
-    } catch {
+    } catch (e) {
+        console.error(e)
         return res.status(500).json({ error: 'Failed to delete image' })
     }
 })
@@ -250,7 +271,8 @@ app.put('/api/:resource/reorder', requireAdmin, async (req, res) => {
         'members': 'members',
         'news': 'news',
         'gallery': 'gallery_items',
-        'notices': 'notices'
+        'notices': 'notices',
+        'memories': 'memory_images'
     }
     
     const tableName = validResources[resource]
