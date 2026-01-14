@@ -24,7 +24,10 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 // Memory storage for uploads
-const upload = multer({ storage: multer.memoryStorage() })
+const upload = multer({ 
+    storage: multer.memoryStorage(),
+    limits: { fileSize: Infinity, fieldSize: Infinity }
+})
 
 // Helper to map id to _id and snake_case to camelCase for frontend compatibility
 const mapId = (item) => {
