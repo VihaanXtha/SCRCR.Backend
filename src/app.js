@@ -5,6 +5,7 @@ import { createClient } from '@supabase/supabase-js'
 import dotenv from 'dotenv'
 import multer from 'multer'
 import path from 'path'
+import { Expo } from 'expo-server-sdk'
 
 dotenv.config()
 const app = express()
@@ -22,6 +23,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+const expo = new Expo()
 
 // Memory storage for uploads
 const upload = multer({ 
@@ -56,12 +58,84 @@ const toSnake = (o) => {
     return newO
 }
 
+// --- Notification Helper ---
+const sendPushNotifications = async (title, body, data = {}) => {
+  try {
+    // 1. Get all tokens from DB
+    const { data: tokens, error } = await supabase.from('push_tokens').select('token')
+    if (error) {
+      console.error('Error fetching push tokens:', error)
+      return
+    }
+
+    if (!tokens || tokens.length === 0) return
+
+    // 2. Create messages
+    let messages = []
+    for (const { token } of tokens) {
+      if (!Expo.isExpoPushToken(token)) {
+        console.error(`Push token ${token} is not a valid Expo push token`)
+        continue
+      }
+      messages.push({
+        to: token,
+        sound: 'default',
+        title,
+        body,
+        data,
+      })
+    }
+
+    // 3. Chunk and send
+    let chunks = expo.chunkPushNotifications(messages)
+    for (let chunk of chunks) {
+      try {
+        let ticketChunk = await expo.sendPushNotificationsAsync(chunk)
+        console.log('Notification sent:', ticketChunk)
+      } catch (error) {
+        console.error(error)
+      }
+    }
+  } catch (error) {
+    console.error('Error sending push notifications:', error)
+  }
+}
+
+
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 app.get('/', (_req, res) => res.redirect('/api/health'))
 
-// Static files are no longer served from local FS in production/Supabase mode
-// But we keep the route for backward compatibility if any static assets remain? 
-// No, we should rely on public URLs.
+// --- Notifications ---
+
+app.post('/api/notifications/register', async (req, res) => {
+  try {
+    const { token } = req.body
+    if (!token) return res.status(400).json({ error: 'Token is required' })
+
+    // Check if exists
+    const { data: existing } = await supabase
+      .from('push_tokens')
+      .select('id')
+      .eq('token', token)
+      .single()
+
+    if (existing) {
+      return res.json({ ok: true, message: 'Token already registered' })
+    }
+
+    // Insert
+    const { error } = await supabase
+      .from('push_tokens')
+      .insert({ token })
+
+    if (error) throw error
+    return res.status(201).json({ ok: true })
+  } catch (e) {
+    console.error(e)
+    return res.status(500).json({ error: 'Failed to register token' })
+  }
+})
+
 
 // --- Memories (Database + Storage) ---
 
@@ -370,6 +444,10 @@ app.post('/api/news', requireAdmin, async (req, res) => {
     }
     const { data, error } = await supabase.from('news').insert(payload).select().single()
     if (error) throw error
+    
+    // Send Notification
+    sendPushNotifications('New Update', data.title || 'New item added', { type: 'news', id: data.id })
+
     return res.status(201).json(mapId(data))
   } catch {
     return res.status(400).json({ error: 'Failed to create news' })
@@ -490,6 +568,10 @@ app.post('/api/notices', requireAdmin, async (req, res) => {
   try {
     const { data, error } = await supabase.from('notices').insert(toSnake(req.body)).select().single()
     if (error) throw error
+
+    // Send Notification
+    sendPushNotifications('New Notice', data.title || 'Important Notice', { type: 'notice', id: data.id })
+
     return res.status(201).json(mapId(data))
   } catch {
     return res.status(400).json({ error: 'Failed to create notice' })
