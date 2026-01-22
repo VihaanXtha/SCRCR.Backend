@@ -6,6 +6,7 @@ import dotenv from 'dotenv'
 import multer from 'multer'
 import path from 'path'
 import { Expo } from 'expo-server-sdk'
+import nodemailer from 'nodemailer'
 
 dotenv.config()
 const app = express()
@@ -17,10 +18,22 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'changeme'
 const ADMIN_USER = process.env.ADMIN_USER || 'vihaan'
 const ADMIN_PASS = process.env.ADMIN_PASS || 'doramon12'
+const EMAIL_USER = process.env.EMAIL_USER
+const EMAIL_PASS = process.env.EMAIL_PASS
+const EMAIL_TO = 'scrc.rupandehi@gmail.com'
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.error('Missing Supabase credentials')
 }
+
+// Nodemailer Transporter
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: EMAIL_USER,
+    pass: EMAIL_PASS,
+  },
+})
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 const expo = new Expo()
@@ -104,6 +117,94 @@ const sendPushNotifications = async (title, body, data = {}) => {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 app.get('/', (_req, res) => res.redirect('/api/health'))
+
+// --- Contact Email ---
+
+app.post('/api/contact', async (req, res) => {
+  try {
+    const { name, email, phone, message } = req.body
+    
+    if (!EMAIL_USER || !EMAIL_PASS) {
+      console.warn('Email credentials not configured')
+      return res.status(500).json({ error: 'Email service not configured' })
+    }
+
+    const mailOptions = {
+      from: EMAIL_USER,
+      to: EMAIL_TO,
+      subject: `New Contact Form Submission from ${name}`,
+      text: `
+        Name: ${name}
+        Email: ${email}
+        Phone: ${phone}
+        
+        Message:
+        ${message}
+      `
+    }
+
+    await transporter.sendMail(mailOptions)
+    return res.json({ ok: true })
+  } catch (e) {
+    console.error('Email error:', e)
+    return res.status(500).json({ error: 'Failed to send email' })
+  }
+})
+
+// --- Membership Application Email ---
+
+app.post('/api/membership', upload.fields([{ name: 'photo', maxCount: 1 }, { name: 'citizenship', maxCount: 1 }]), async (req, res) => {
+  try {
+    const { fname, mname, lname, dob, citizenship_no, gender, address, phone, email } = req.body
+    const files = req.files
+    
+    if (!EMAIL_USER || !EMAIL_PASS) {
+      console.warn('Email credentials not configured')
+      return res.status(500).json({ error: 'Email service not configured' })
+    }
+
+    const attachments = []
+    if (files['photo']) {
+      attachments.push({
+        filename: files['photo'][0].originalname,
+        content: files['photo'][0].buffer
+      })
+    }
+    if (files['citizenship']) {
+      attachments.push({
+        filename: files['citizenship'][0].originalname,
+        content: files['citizenship'][0].buffer
+      })
+    }
+
+    const mailOptions = {
+      from: EMAIL_USER,
+      to: EMAIL_TO,
+      subject: `New Membership Application: ${fname} ${lname}`,
+      text: `
+        New Membership Application Received.
+        
+        Full Name: ${fname} ${mname || ''} ${lname}
+        Date of Birth: ${dob}
+        Citizenship No: ${citizenship_no}
+        Gender: ${gender}
+        Address: ${address}
+        Phone: ${phone}
+        Email: ${email}
+        
+        Please find attached documents.
+      `,
+      attachments
+    }
+
+    await transporter.sendMail(mailOptions)
+    return res.json({ ok: true })
+  } catch (e) {
+    console.error('Membership email error:', e)
+    return res.status(500).json({ error: 'Failed to submit application' })
+  }
+})
+
 
 // --- Notifications ---
 
