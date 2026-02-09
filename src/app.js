@@ -1,4 +1,3 @@
-
 import express from 'express'
 import cors from 'cors'
 import { createClient } from '@supabase/supabase-js'
@@ -7,26 +6,55 @@ import multer from 'multer'
 import path from 'path'
 import { Expo } from 'expo-server-sdk'
 import nodemailer from 'nodemailer'
+import { v2 as cloudinary } from 'cloudinary'
+import stream from 'stream'
 
+// Load environment variables from .env file into process.env
 dotenv.config()
+
+/**
+ * Express Application Setup
+ * -------------------------
+ * Initialize the Express app and configure essential middleware.
+ */
 const app = express()
+
+// Middleware: Enable Cross-Origin Resource Sharing (CORS)
+// This allows the frontend (running on a different domain/port) to access this API.
 app.use(cors())
+
+// Middleware: Parse incoming JSON payloads
+// This converts the JSON body of a request into a JavaScript object available at req.body.
 app.use(express.json())
 
+// --- Configuration & Environment Variables ---
+// These values are sensitive and should be stored in a .env file, not hardcoded.
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'changeme'
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'changeme' // Simple token for admin auth
 const ADMIN_USER = process.env.ADMIN_USER || 'vihaan'
 const ADMIN_PASS = process.env.ADMIN_PASS || 'doramon12'
-const EMAIL_USER = process.env.EMAIL_USER
+const EMAIL_USER = process.env.EMAIL_USER // For sending emails
 const EMAIL_PASS = process.env.EMAIL_PASS
-const EMAIL_TO = 'scrc.rupandehi@gmail.com'
+const EMAIL_TO = 'scrc.rupandehi@gmail.com' // Destination for contact forms
 
+// --- Cloudinary Configuration ---
+// Used for storing images and videos in the cloud.
+// It provides a CDN for fast delivery and on-the-fly transformations.
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+})
+
+// Check for critical configuration
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.error('Missing Supabase credentials')
 }
 
-// Nodemailer Transporter
+// --- Nodemailer Transporter ---
+// Configured to send emails via Gmail.
+// Note: Requires an App Password if using Gmail with 2FA.
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
@@ -35,16 +63,34 @@ const transporter = nodemailer.createTransport({
   },
 })
 
+// --- Supabase Client ---
+// Initialize the connection to the Supabase database (PostgreSQL).
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+// --- Expo SDK ---
+// Initialize the Expo SDK client for sending push notifications to mobile devices.
 const expo = new Expo()
 
-// Memory storage for uploads
+// --- File Upload Middleware (Multer) ---
+// Configured to store uploaded files in memory (RAM) as a buffer.
+// This allows us to process the file (upload to Cloudinary) without saving it to disk first.
 const upload = multer({ 
     storage: multer.memoryStorage(),
-    limits: { fileSize: Infinity, fieldSize: Infinity }
+    limits: { fileSize: Infinity, fieldSize: Infinity } // Allow large files
 })
 
-// Helper to map id to _id and snake_case to camelCase for frontend compatibility
+// --- Helper Functions ---
+
+/**
+ * mapId
+ * -----
+ * Transforms a database record to a frontend-friendly format.
+ * 1. Renames 'id' to '_id' (common convention).
+ * 2. Converts snake_case DB columns (e.g., video_url) to camelCase (videoUrl).
+ * 
+ * @param item - The raw database record.
+ * @returns The transformed object.
+ */
 const mapId = (item) => {
   if (!item) return null
   const { id, published_at, video_url, media_url, ...rest } = item
@@ -57,9 +103,17 @@ const mapId = (item) => {
   }
 }
 
+// Helper to map a list of items
 const mapList = (items) => (items || []).map(mapId)
 
-// Helper to map camelCase to snake_case for Supabase
+/**
+ * toSnake
+ * -------
+ * Converts frontend camelCase properties back to snake_case for database insertion.
+ * 
+ * @param o - The input object with camelCase keys.
+ * @returns A new object with snake_case keys.
+ */
 const toSnake = (o) => {
     const newO = {}
     for (const k in o) {
@@ -71,10 +125,18 @@ const toSnake = (o) => {
     return newO
 }
 
-// --- Notification Helper ---
+/**
+ * sendPushNotifications
+ * ---------------------
+ * Sends push notifications to all registered devices using Expo's push service.
+ * 
+ * @param {string} title - Notification title.
+ * @param {string} body - Notification body text.
+ * @param {object} data - Additional JSON data to send with the notification.
+ */
 const sendPushNotifications = async (title, body, data = {}) => {
   try {
-    // 1. Get all tokens from DB
+    // 1. Fetch all registered push tokens from the database
     const { data: tokens, error } = await supabase.from('push_tokens').select('token')
     if (error) {
       console.error('Error fetching push tokens:', error)
@@ -83,9 +145,10 @@ const sendPushNotifications = async (title, body, data = {}) => {
 
     if (!tokens || tokens.length === 0) return
 
-    // 2. Create messages
+    // 2. Construct the messages array
     let messages = []
     for (const { token } of tokens) {
+      // Validate the token format
       if (!Expo.isExpoPushToken(token)) {
         console.error(`Push token ${token} is not a valid Expo push token`)
         continue
@@ -99,7 +162,7 @@ const sendPushNotifications = async (title, body, data = {}) => {
       })
     }
 
-    // 3. Chunk and send
+    // 3. Chunk the messages (Expo limits batch sizes) and send
     let chunks = expo.chunkPushNotifications(messages)
     for (let chunk of chunks) {
       try {
@@ -115,11 +178,21 @@ const sendPushNotifications = async (title, body, data = {}) => {
 }
 
 
+// --- API Routes ---
+
+/**
+ * Health Check
+ * ------------
+ * Simple endpoint to verify the server is running.
+ */
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 app.get('/', (_req, res) => res.redirect('/api/health'))
 
-// --- Contact Email ---
-
+/**
+ * Contact Form Submission
+ * -----------------------
+ * Receives contact details and sends an email to the admin.
+ */
 app.post('/api/contact', async (req, res) => {
   try {
     const { name, email, phone, message } = req.body
@@ -151,8 +224,12 @@ app.post('/api/contact', async (req, res) => {
   }
 })
 
-// --- Membership Application Email ---
-
+/**
+ * Membership Application Submission
+ * ---------------------------------
+ * Handles form data + file attachments (photo, citizenship).
+ * Sends an email with attachments to the admin.
+ */
 app.post('/api/membership', upload.fields([{ name: 'photo', maxCount: 1 }, { name: 'citizenship', maxCount: 1 }]), async (req, res) => {
   try {
     const { fname, mname, lname, dob, citizenship_no, gender, address, phone, email } = req.body
@@ -163,6 +240,7 @@ app.post('/api/membership', upload.fields([{ name: 'photo', maxCount: 1 }, { nam
       return res.status(500).json({ error: 'Email service not configured' })
     }
 
+    // Process attachments for Nodemailer
     const attachments = []
     if (files['photo']) {
       attachments.push({
@@ -208,12 +286,17 @@ app.post('/api/membership', upload.fields([{ name: 'photo', maxCount: 1 }, { nam
 
 // --- Notifications ---
 
+/**
+ * Register Push Token
+ * -------------------
+ * Saves the Expo push token from the mobile app to the database.
+ */
 app.post('/api/notifications/register', async (req, res) => {
   try {
     const { token } = req.body
     if (!token) return res.status(400).json({ error: 'Token is required' })
 
-    // Check if exists
+    // Check if token already exists to prevent duplicates
     const { data: existing } = await supabase
       .from('push_tokens')
       .select('id')
@@ -224,7 +307,7 @@ app.post('/api/notifications/register', async (req, res) => {
       return res.json({ ok: true, message: 'Token already registered' })
     }
 
-    // Insert
+    // Insert new token
     const { error } = await supabase
       .from('push_tokens')
       .insert({ token })
@@ -238,8 +321,13 @@ app.post('/api/notifications/register', async (req, res) => {
 })
 
 
-// --- Memories (Database + Storage) ---
+// --- Memories (Albums & Images) ---
 
+/**
+ * List Albums
+ * -----------
+ * Fetches all memory albums along with their cover image (the first image in the album).
+ */
 app.get('/api/memories/albums', async (_req, res) => {
   try {
     const { data: albums, error } = await supabase
@@ -255,6 +343,7 @@ app.get('/api/memories/albums', async (_req, res) => {
 
     if (error) throw error
 
+    // Transform data to include count and cover image
     const result = albums.map(album => ({
       name: album.name,
       count: album.memory_images.length,
@@ -268,9 +357,15 @@ app.get('/api/memories/albums', async (_req, res) => {
   }
 })
 
+/**
+ * Create Album
+ * ------------
+ * Creates a new album (folder). Admin only.
+ */
 app.post('/api/memories/albums', requireAdmin, async (req, res) => {
   try {
     const { name } = req.body || {}
+    // Sanitize the album name to be safe for URLs/Folder paths
     const safe = (name || '').toString().replace(/[^a-zA-Z0-9_\- ]/g, '').trim()
     if (!safe) return res.status(400).json({ error: 'Invalid name' })
     
@@ -289,11 +384,16 @@ app.post('/api/memories/albums', requireAdmin, async (req, res) => {
   }
 })
 
+/**
+ * Delete Album
+ * ------------
+ * Deletes an album and all its associated images (cascade delete in DB, manual cleanup in storage).
+ */
 app.delete('/api/memories/albums/:album', requireAdmin, async (req, res) => {
   try {
     const albumName = (req.params.album || '').toString().trim()
     
-    // Get album ID
+    // 1. Get album ID
     const { data: album, error: albumErr } = await supabase
       .from('memory_albums')
       .select('id')
@@ -302,14 +402,16 @@ app.delete('/api/memories/albums/:album', requireAdmin, async (req, res) => {
 
     if (albumErr || !album) throw new Error('Album not found')
 
-    // Delete from storage
+    // 2. Delete files from Supabase Storage (legacy support)
+    // Note: Cloudinary images are deleted individually or by folder depending on setup, 
+    // here we focus on the legacy bucket cleanup if used.
     const { data: files } = await supabase.storage.from('scrc-uploads').list(`memories/${albumName}`, { limit: 1000 })
     if (files && files.length > 0) {
         const paths = files.map(f => `memories/${albumName}/${f.name}`)
         await supabase.storage.from('scrc-uploads').remove(paths)
     }
 
-    // Delete from DB (cascade will handle images)
+    // 3. Delete from DB (Foreign key constraints should cascade delete images)
     const { error } = await supabase.from('memory_albums').delete().eq('id', album.id)
     if (error) throw error
 
@@ -320,13 +422,20 @@ app.delete('/api/memories/albums/:album', requireAdmin, async (req, res) => {
   }
 })
 
+/**
+ * List Album Images
+ * -----------------
+ * Fetches all images for a specific album.
+ */
 app.get('/api/memories/:album', async (req, res) => {
   try {
     const albumName = (req.params.album || '').toString().trim()
     
+    // Find album by name
     const { data: album } = await supabase.from('memory_albums').select('id').eq('name', albumName).single()
     if (!album) return res.json([])
 
+    // Fetch images linked to this album
     const { data: images, error } = await supabase
         .from('memory_images')
         .select('id, url, rank')
@@ -343,6 +452,59 @@ app.get('/api/memories/:album', async (req, res) => {
   }
 })
 
+/**
+ * Helper: uploadToCloudinary
+ * --------------------------
+ * Uploads a buffer to Cloudinary using a stream.
+ */
+const uploadToCloudinary = (buffer, folder) => {
+    return new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+            { folder: folder, resource_type: 'auto' },
+            (error, result) => {
+                if (error) return reject(error)
+                resolve(result)
+            }
+        )
+        const bufferStream = new stream.PassThrough()
+        bufferStream.end(buffer)
+        bufferStream.pipe(uploadStream)
+    })
+}
+
+/**
+ * Helper: getPublicIdFromUrl
+ * --------------------------
+ * Extracts the Cloudinary Public ID from a URL, which is needed for deletion.
+ */
+const getPublicIdFromUrl = (url) => {
+    try {
+        const parts = url.split('/')
+        const uploadIndex = parts.indexOf('upload')
+        if (uploadIndex === -1) return null
+        
+        // Skip 'v1234' version part if present
+        let startIndex = uploadIndex + 1
+        if (parts[startIndex] && parts[startIndex].startsWith('v')) {
+            startIndex++
+        }
+        
+        const publicIdParts = parts.slice(startIndex)
+        // Remove extension from last part
+        const lastIdx = publicIdParts.length - 1
+        publicIdParts[lastIdx] = publicIdParts[lastIdx].split('.')[0]
+        
+        return publicIdParts.join('/')
+    } catch (e) {
+        return null
+    }
+}
+
+/**
+ * Upload Images to Album
+ * ----------------------
+ * Handles multiple file uploads to a specific album.
+ */
 app.post('/api/memories/:album/upload', requireAdmin, upload.array('images', 50), async (req, res) => {
   try {
     const albumName = (req.params.album || '').toString().trim()
@@ -353,21 +515,19 @@ app.post('/api/memories/:album/upload', requireAdmin, upload.array('images', 50)
     if (!album) return res.status(404).json({ error: 'Album not found' })
 
     for (const file of files) {
-        const ext = path.extname(file.originalname)
-        const name = `${Date.now()}_${Math.random().toString(36).substring(7)}${ext}`
-        const { error: storageErr } = await supabase.storage.from('scrc-uploads').upload(`memories/${albumName}/${name}`, file.buffer, {
-            contentType: file.mimetype
-        })
-        
-        if (!storageErr) {
-            const url = supabase.storage.from('scrc-uploads').getPublicUrl(`memories/${albumName}/${name}`).data.publicUrl
+        try {
+            // Upload to Cloudinary
+            const result = await uploadToCloudinary(file.buffer, `memories/${albumName}`)
+            const url = result.secure_url
             uploadedUrls.push(url)
             
-            // Insert into DB
+            // Insert record into DB
             await supabase.from('memory_images').insert({
                 album_id: album.id,
                 url: url
             })
+        } catch (err) {
+            console.error('Upload error for file:', file.originalname, err)
         }
     }
     return res.status(201).json({ uploaded: uploadedUrls })
@@ -377,22 +537,35 @@ app.post('/api/memories/:album/upload', requireAdmin, upload.array('images', 50)
   }
 })
 
+/**
+ * Delete Image from Album
+ * -----------------------
+ * Deletes a specific image from DB and Cloudinary.
+ */
 app.delete('/api/memories/:album/:filename', requireAdmin, async (req, res) => {
     try {
         const albumName = (req.params.album || '').toString().trim()
         const filename = (req.params.filename || '').toString()
         
-        // Remove from storage
-        const { error: storageErr } = await supabase.storage.from('scrc-uploads').remove([`memories/${albumName}/${filename}`])
-        if (storageErr) throw storageErr
-        
-        // Remove from DB
-        const urlPart = `memories/${albumName}/${filename}`
+        // Find the image in DB to get the full URL
         const { data: images } = await supabase.from('memory_images').select('id, url')
-        const toDelete = images.find(img => img.url.includes(urlPart))
+        // Match by partial filename (simplistic approach)
+        const toDelete = images.find(img => img.url.includes(filename))
         
         if (toDelete) {
+            // Delete from DB
             await supabase.from('memory_images').delete().eq('id', toDelete.id)
+            
+            // Delete from Cloudinary
+            if (toDelete.url.includes('cloudinary')) {
+                const publicId = getPublicIdFromUrl(toDelete.url)
+                if (publicId) {
+                    await cloudinary.uploader.destroy(publicId)
+                }
+            } else {
+                // Legacy Supabase Storage delete
+                await supabase.storage.from('scrc-uploads').remove([`memories/${albumName}/${filename}`])
+            }
         }
 
         return res.json({ ok: true })
@@ -403,8 +576,14 @@ app.delete('/api/memories/:album/:filename', requireAdmin, async (req, res) => {
 })
 
 
-// --- Auth ---
+// --- Authentication ---
 
+/**
+ * Login
+ * -----
+ * Simple username/password check against environment variables.
+ * Returns a static token on success.
+ */
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body || {}
   if (username === ADMIN_USER && password === ADMIN_PASS) {
@@ -413,6 +592,11 @@ app.post('/api/login', (req, res) => {
   return res.status(401).json({ error: 'Invalid credentials' })
 })
 
+/**
+ * Admin Middleware
+ * ----------------
+ * Protects routes by checking for the 'x-admin-token' header.
+ */
 function requireAdmin(req, res, next) {
   const token = req.headers['x-admin-token']
   if (!token || token !== ADMIN_TOKEN) {
@@ -421,7 +605,7 @@ function requireAdmin(req, res, next) {
   next()
 }
 
-// --- Members ---
+// --- Members API ---
 
 app.get('/api/members/:type', async (req, res) => {
   try {
@@ -440,11 +624,13 @@ app.get('/api/members/:type', async (req, res) => {
   }
 })
 
+// Generic reorder endpoint for any resource
 app.put('/api/:resource/reorder', requireAdmin, async (req, res) => {
   try {
     const { resource } = req.params
     const { updates } = req.body
     
+    // Whitelist allowed resources to prevent SQL injection-like behavior
     const validResources = {
         'members': 'members',
         'news': 'news',
@@ -458,10 +644,10 @@ app.put('/api/:resource/reorder', requireAdmin, async (req, res) => {
     
     if (!updates || !Array.isArray(updates)) return res.status(400).json({ error: 'Invalid updates payload' })
     
-    // Validate IDs
     const validUpdates = updates.filter(u => u.id && typeof u.rank === 'number')
     if (validUpdates.length === 0) return res.json({ ok: true })
 
+    // Execute updates in parallel
     const promises = validUpdates.map(u => 
       supabase.from(tableName).update({ rank: u.rank }).eq('id', u.id)
     )
@@ -487,7 +673,7 @@ app.post('/api/members', requireAdmin, async (req, res) => {
 app.put('/api/members/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params
-    const { _id, ...updateData } = req.body // Remove _id if present in body
+    const { _id, ...updateData } = req.body // Remove _id if present
     const { data, error } = await supabase
         .from('members')
         .update(updateData)
@@ -515,7 +701,7 @@ app.delete('/api/members/:id', requireAdmin, async (req, res) => {
   }
 })
 
-// --- News ---
+// --- News API ---
 
 app.get('/api/news', async (req, res) => {
   try {
@@ -546,7 +732,7 @@ app.post('/api/news', requireAdmin, async (req, res) => {
     const { data, error } = await supabase.from('news').insert(payload).select().single()
     if (error) throw error
     
-    // Send Notification
+    // Trigger push notification for new news
     sendPushNotifications('New Update', data.title || 'New item added', { type: 'news', id: data.id })
 
     return res.status(201).json(mapId(data))
@@ -580,7 +766,7 @@ app.delete('/api/news/:id', requireAdmin, async (req, res) => {
   }
 })
 
-// --- Gallery ---
+// --- Gallery API ---
 
 app.get('/api/gallery', async (_req, res) => {
   try {
@@ -596,19 +782,18 @@ app.post('/api/gallery', requireAdmin, async (req, res) => {
   try {
     const payload = {
         ...toSnake(req.body),
-        type: req.body?.type || 'image', // Default to image if not specified
-        img: req.body?.url || req.body?.img, // Handle both 'url' and 'img'
+        type: req.body?.type || 'image',
+        img: req.body?.url || req.body?.img,
         title: req.body?.title,
         video_url: req.body?.videoUrl
     }
-    // Clean up undefined/null values so they don't break insert if not nullable
+    // Clean up properties to avoid DB errors
     if (payload.img === undefined) delete payload.img
     if (payload.video_url === undefined) delete payload.video_url
     if (payload.title === undefined) delete payload.title
-    
-    // Explicitly remove fields that don't exist in DB
     delete payload.url
     delete payload.videoUrl
+
     const { data, error } = await supabase.from('gallery_items').insert(payload).select().single()
     if (error) {
         console.error('Supabase Gallery Insert Error:', error)
@@ -646,7 +831,7 @@ app.delete('/api/gallery/:id', requireAdmin, async (req, res) => {
   }
 })
 
-// --- Notices ---
+// --- Notices API ---
 
 app.get('/api/notices', async (req, res) => {
   try {
@@ -670,7 +855,7 @@ app.post('/api/notices', requireAdmin, async (req, res) => {
     const { data, error } = await supabase.from('notices').insert(toSnake(req.body)).select().single()
     if (error) throw error
 
-    // Send Notification
+    // Trigger push notification
     sendPushNotifications('New Notice', data.title || 'Important Notice', { type: 'notice', id: data.id })
 
     return res.status(201).json(mapId(data))
@@ -705,24 +890,22 @@ app.delete('/api/notices/:id', requireAdmin, async (req, res) => {
   }
 })
 
-// --- General Upload ---
+// --- General Upload Endpoint ---
 
+/**
+ * Single File Upload
+ * ------------------
+ * Generic endpoint to upload a file to Cloudinary and get a URL.
+ * Useful for profile pictures, etc.
+ */
 app.post('/api/upload', requireAdmin, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' })
     
-    const ext = path.extname(req.file.originalname)
-    const name = `uploads/${Date.now()}_${Math.random().toString(36).substring(7)}${ext}`
-    
-    const { error } = await supabase.storage.from('scrc-uploads').upload(name, req.file.buffer, {
-        contentType: req.file.mimetype
-    })
-    
-    if (error) throw error
-    
-    const url = supabase.storage.from('scrc-uploads').getPublicUrl(name).data.publicUrl
-    return res.status(201).json({ url })
+    const result = await uploadToCloudinary(req.file.buffer, 'uploads')
+    return res.status(201).json({ url: result.secure_url })
   } catch (e) {
+    console.error('Upload failed:', e)
     return res.status(500).json({ error: 'Upload failed' })
   }
 })
