@@ -8,6 +8,7 @@ import { Expo } from 'expo-server-sdk'
 import nodemailer from 'nodemailer'
 import { v2 as cloudinary } from 'cloudinary'
 import stream from 'stream'
+import webpush from 'web-push'
 
 // Load environment variables from .env file into process.env
 dotenv.config()
@@ -37,6 +38,13 @@ const ADMIN_PASS = process.env.ADMIN_PASS || 'doramon12'
 const EMAIL_USER = process.env.EMAIL_USER // For sending emails
 const EMAIL_PASS = process.env.EMAIL_PASS
 const EMAIL_TO = 'scrc.rupandehi@gmail.com' // Destination for contact forms
+
+// VAPID Keys for Web Push
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || 'BHKnV6TV1pUNOtf3yuesnZHzZegXRAMxlVJMtrSUgJKiTvPDwF17XP8pk0ZbSGWBrmYd6CQCuSZVnO-FUrA728c'
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || 'gwqBjLD3V9AfBKVygQNn4pTWtad3jpZWwlhRzU4CB4Y'
+const VAPID_SUBJECT = 'mailto:scrc.rupandehi@gmail.com'
+
+webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY)
 
 // --- Cloudinary Configuration ---
 // Used for storing images and videos in the cloud.
@@ -128,7 +136,8 @@ const toSnake = (o) => {
 /**
  * sendPushNotifications
  * ---------------------
- * Sends push notifications to all registered devices using Expo's push service.
+ * Sends push notifications to all registered devices using Expo's push service (Mobile)
+ * AND Web Push (Browser).
  * 
  * @param {string} title - Notification title.
  * @param {string} body - Notification body text.
@@ -145,33 +154,61 @@ const sendPushNotifications = async (title, body, data = {}) => {
 
     if (!tokens || tokens.length === 0) return
 
-    // 2. Construct the messages array
-    let messages = []
+    let expoMessages = []
+    let webPushPromises = []
+
     for (const { token } of tokens) {
-      // Validate the token format
-      if (!Expo.isExpoPushToken(token)) {
-        console.error(`Push token ${token} is not a valid Expo push token`)
-        continue
+      // Check if it's a Web Push Subscription (JSON object)
+      if (token.startsWith('{')) {
+         try {
+           const subscription = JSON.parse(token)
+           const payload = JSON.stringify({ title, body, data })
+           webPushPromises.push(
+             webpush.sendNotification(subscription, payload).catch(err => {
+               if (err.statusCode === 410 || err.statusCode === 404) {
+                 // Subscription expired, remove from DB
+                 console.log('Subscription expired, deleting...', token.substring(0, 20))
+                 supabase.from('push_tokens').delete().eq('token', token).then(() => {})
+               } else {
+                 console.error('Web Push Error:', err)
+               }
+             })
+           )
+         } catch (e) {
+           console.error('Failed to parse web push token', e)
+         }
+      } 
+      // Check if it's an Expo Push Token
+      else if (Expo.isExpoPushToken(token)) {
+        expoMessages.push({
+          to: token,
+          sound: 'default',
+          title,
+          body,
+          data,
+        })
       }
-      messages.push({
-        to: token,
-        sound: 'default',
-        title,
-        body,
-        data,
-      })
     }
 
-    // 3. Chunk the messages (Expo limits batch sizes) and send
-    let chunks = expo.chunkPushNotifications(messages)
-    for (let chunk of chunks) {
-      try {
-        let ticketChunk = await expo.sendPushNotificationsAsync(chunk)
-        console.log('Notification sent:', ticketChunk)
-      } catch (error) {
-        console.error(error)
+    // Send Expo Notifications
+    if (expoMessages.length > 0) {
+      let chunks = expo.chunkPushNotifications(expoMessages)
+      for (let chunk of chunks) {
+        try {
+          let ticketChunk = await expo.sendPushNotificationsAsync(chunk)
+          console.log('Expo Notification sent:', ticketChunk)
+        } catch (error) {
+          console.error(error)
+        }
       }
     }
+
+    // Send Web Push Notifications
+    if (webPushPromises.length > 0) {
+      await Promise.all(webPushPromises)
+      console.log(`Sent ${webPushPromises.length} web push notifications`)
+    }
+
   } catch (error) {
     console.error('Error sending push notifications:', error)
   }
@@ -799,6 +836,10 @@ app.post('/api/gallery', requireAdmin, async (req, res) => {
         console.error('Supabase Gallery Insert Error:', error)
         throw error
     }
+
+    // Trigger push notification for new gallery item
+    sendPushNotifications('New Gallery Item', data.title || 'New item added to gallery', { type: 'gallery', id: data.id })
+
     return res.status(201).json(mapId(data))
   } catch (e) {
     console.error('Gallery create error:', e)
